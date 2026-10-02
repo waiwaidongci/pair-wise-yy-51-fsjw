@@ -9,7 +9,7 @@ import { MatCheckboxModule } from '@angular/material/checkbox'
 import { MatDividerModule } from '@angular/material/divider'
 import maplibregl, { LngLatBounds, Map as MapLibreMap } from 'maplibre-gl'
 import { length, lineString } from '@turf/turf'
-import type { RoutePackage, RiskSegment } from '../types'
+import type { RiskLevel, RoutePackage, RiskSegment } from '../types'
 import { RouteState } from '../store/route.reducer'
 import * as RouteActions from '../store/route.actions'
 
@@ -23,15 +23,20 @@ import * as RouteActions from '../store/route.actions'
       <div class="toolbar">
         <mat-form-field appearance="outline" subscriptSizing="dynamic"><mat-label>运输单</mat-label><mat-select [ngModel]="selectedRouteId" (ngModelChange)="selectRoute($event)">@for (route of (state$ | async)?.routes || []; track route.id) { <mat-option [value]="route.id">{{route.id}} · {{route.trainCode}}</mat-option> }</mat-select></mat-form-field>
         <mat-checkbox [(ngModel)]="layers.tunnel" (change)="refreshLayers()">隧道</mat-checkbox><mat-checkbox [(ngModel)]="layers.bridge" (change)="refreshLayers()">桥梁</mat-checkbox><mat-checkbox [(ngModel)]="layers.water" (change)="refreshLayers()">水源地</mat-checkbox><mat-checkbox [(ngModel)]="layers.population" (change)="refreshLayers()">人口密集区</mat-checkbox>
+        <span class="spacer"></span>
+        @if ((state$ | async)?.baselineLocked) { <span class="lock-hint">审计基线已锁定：风险调整仅生成待复核草案</span> }
       </div>
+      @if ((state$ | async)?.conflictNotice) {
+        <div class="notice warn"><b>版本冲突</b><span>{{ (state$ | async)?.conflictNotice }}</span></div>
+      }
       <div class="grid-2">
         <div #mapEl class="map"></div>
         <aside class="card">
           <div class="panel-head"><div><h2>区段风险清单</h2><p>已按风险等级排序</p></div><strong [class.risk-high]="selectedRoute !== undefined && selectedRoute.score >= 70">总风险 {{selectedRoute?.score}}</strong></div>
           @for (segment of selectedRoute?.segments || []; track segment.id) {
-            <button class="segment" [class.active]="segment.id === selectedSegmentId" (click)="selectSegment(segment)">
-              <span><b>{{segment.name}}</b><small>{{segment.from}} → {{segment.to}} · {{segment.km}} km · {{segment.speed}}</small><em>{{segment.risks.join(' / ')}}</em></span><strong [class.risk-high]="segment.level==='高'" [class.risk-mid]="segment.level==='中'" [class.risk-low]="segment.level==='低'">{{segment.level}}</strong>
-            </button>
+            <div class="segment" [class.active]="segment.id === selectedSegmentId" (click)="selectSegment(segment)">
+              <span><b>{{segment.name}}</b><small>{{segment.from}} → {{segment.to}} · {{segment.km}} km · {{segment.speed}} · 区段版本 v{{segment.version}}</small><em>{{segment.risks.join(' / ')}}</em></span><span class="segment-side"><mat-select class="level-select" [ngModel]="segment.level" (click)="$event.stopPropagation()" (ngModelChange)="changeLevel(segment, $event)"><mat-option value="高">高风险</mat-option><mat-option value="中">中风险</mat-option><mat-option value="低">低风险</mat-option></mat-select><strong [class.risk-high]="segment.level==='高'" [class.risk-mid]="segment.level==='中'" [class.risk-low]="segment.level==='低'">{{segment.level}}</strong></span>
+            </div>
           }
           <mat-divider />
           <h3>路径测算</h3><p>实测里程：{{routeLength}} km</p><p>预计运行：{{estimatedTime}}</p><p>限制区段：{{restrictedCount}} 处</p>
@@ -41,7 +46,7 @@ import * as RouteActions from '../store/route.actions'
     </main>
   `,
   styles: [`
-    h2,h3{margin:0 0 10px}.panel-head{display:flex;justify-content:space-between}.segment{width:100%;display:flex;justify-content:space-between;text-align:left;gap:10px;padding:13px;margin:6px 0;border:1px solid #e1e7ef;background:#fff;border-radius:6px;color:inherit;cursor:pointer}.segment.active{border-color:#2563eb;background:#f5f8ff}.segment b,.segment small,.segment em{display:block}.segment small{color:#7a8798;margin:4px 0}.segment em{font-size:12px;color:#475569;font-style:normal}
+    h2,h3{margin:0 0 10px}.panel-head{display:flex;justify-content:space-between}.segment{width:100%;display:flex;justify-content:space-between;text-align:left;gap:10px;padding:13px;margin:6px 0;border:1px solid #e1e7ef;background:#fff;border-radius:6px;color:inherit;cursor:pointer}.segment.active{border-color:#2563eb;background:#f5f8ff}.segment b,.segment small,.segment em{display:block}.segment small{color:#7a8798;margin:4px 0}.segment em{font-size:12px;color:#475569;font-style:normal}.segment-side{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex:none}.level-select{width:96px;font-size:12px}.lock-hint{color:#7e22ce;font-size:12.5px;font-weight:600}.notice{display:flex;align-items:center;gap:12px;padding:10px 16px;border-radius:8px;margin-bottom:12px;font-size:13px}.notice.warn{background:#fffbeb;border:1px solid #fde68a}.notice.warn b{color:#b45309}
   `],
 })
 export class RiskMapComponent implements AfterViewInit, OnDestroy {
@@ -71,6 +76,8 @@ export class RiskMapComponent implements AfterViewInit, OnDestroy {
   ngOnDestroy() { this.map?.remove() }
   selectRoute(id: string) { this.store.dispatch(RouteActions.selectRoute({ id })) }
   selectSegment(segment: RiskSegment) { this.store.dispatch(RouteActions.selectSegment({ id: segment.id })); this.map?.flyTo({ center: segment.coordinates[0], zoom: 8 }) }
+  /** 复核人员调整区段风险：携带当前区段版本（乐观锁），基线锁定后仅生成待复核草案 */
+  changeLevel(segment: RiskSegment, level: RiskLevel) { this.store.dispatch(RouteActions.updateSegmentRisk({ segmentId: segment.id, level, expectedVersion: segment.version, author: '风险复核员' })) }
   requireAlternative() { this.store.dispatch(RouteActions.createAlternative()) }
   fitRoute() { if (!this.map || !this.selectedRoute) return; const bounds = new LngLatBounds(); this.selectedRoute.segments.flatMap((segment) => segment.coordinates).forEach((point) => bounds.extend(point)); this.map.fitBounds(bounds, { padding: 50 }) }
   refreshLayers() { for (const [id, visible] of Object.entries(this.layers)) { if (this.map?.getLayer(id)) this.map.setLayoutProperty(id, 'visibility', visible ? 'visible' : 'none') } }
