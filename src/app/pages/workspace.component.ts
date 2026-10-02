@@ -17,36 +17,42 @@ import type { RoutePackage } from '../types'
   imports: [CommonModule, MatTableModule, MatButtonModule, MatFormFieldModule, MatSelectModule, MatProgressBarModule, MatDividerModule],
   template: `
     <main class="page">
-      <div class="page-head"><div><p class="eyebrow">运输许可与路径编组</p><h1>危险货物运输路径审批</h1><p>核对货物类别、编组、许可与区段约束，生成可比较的候选路径。</p></div><div><button mat-stroked-button (click)="createAlternative()">生成替代方案</button> <button mat-flat-button color="primary" (click)="refresh()">重新校验</button></div></div>
-      <div class="grid-4">
-        <article class="card metric"><span>待审批路径</span><strong>{{ (state$ | async)?.routes?.length || 0 }}</strong><small>今日新增 2 条</small></article>
-        <article class="card metric"><span>高风险区段</span><strong class="risk-high">{{ highRiskCount }}</strong><small>需安全与应急会签</small></article>
-        <article class="card metric"><span>许可缺失</span><strong class="risk-mid">1</strong><small>不得进入审批通过态</small></article>
-        <article class="card metric"><span>当前草案</span><strong>v{{ (state$ | async)?.version }}</strong><small>修改均进入审计记录</small></article>
+      <div class="page-head">
+        <div><p class="eyebrow">运输许可与路径编组</p><h1>危险货物运输路径审批</h1><p>核对货物类别、编组、许可与区段约束，候选方案的风险变化按区段驱动会签重算。</p></div>
+        <div><button mat-stroked-button [disabled]="!selectedRoute" (click)="createAlternative()">生成替代方案</button> <button mat-flat-button color="primary" (click)="refresh()">重新校验</button></div>
       </div>
-      @if ((state$ | async)?.loading) { <mat-progress-bar mode="indeterminate" /> }
+      <div class="grid-4">
+        <article class="card metric"><span>候选路径</span><strong>{{ routes.length }}</strong><small>含已复核与替代方案</small></article>
+        <article class="card metric"><span>高风险区段</span><strong class="risk-high">{{ highRiskCount }}</strong><small>变化即失效区段旧会签</small></article>
+        <article class="card metric"><span>待复核草案</span><strong class="risk-mid">{{ draftCount }}</strong><small>锁定基线后不直接落版</small></article>
+        <article class="card metric"><span>会签/审计版本</span><strong>v{{ version }}</strong><small>每次接受写入时间线</small></article>
+      </div>
+      @if (loading) { <mat-progress-bar mode="indeterminate" /> }
       <div class="grid-2">
         <section class="card table-wrap">
           <div class="toolbar"><mat-form-field appearance="outline" subscriptSizing="dynamic"><mat-label>货物类别</mat-label><mat-select><mat-option>全部类别</mat-option><mat-option>第 3 类 易燃液体</mat-option><mat-option>第 8 类 腐蚀品</mat-option></mat-select></mat-form-field><mat-form-field appearance="outline" subscriptSizing="dynamic"><mat-label>审批状态</mat-label><mat-select><mat-option>全部状态</mat-option><mat-option>待安全复核</mat-option><mat-option>待应急复核</mat-option></mat-select></mat-form-field><span class="spacer"></span><button mat-stroked-button>导出审批包</button></div>
-          <table mat-table [dataSource]="(state$ | async)?.routes || []">
-            <ng-container matColumnDef="id"><th mat-header-cell *matHeaderCellDef>运输单</th><td mat-cell *matCellDef="let row"><b>{{row.id}}</b><small class="block">{{row.updatedAt}}</small></td></ng-container>
+          <table mat-table [dataSource]="routes">
+            <ng-container matColumnDef="id"><th mat-header-cell *matHeaderCellDef>运输单 / 版本</th><td mat-cell *matCellDef="let row"><b>{{row.id}}</b><small class="block">{{row.updatedAt}} · r{{row.revision}}</small></td></ng-container>
             <ng-container matColumnDef="cargo"><th mat-header-cell *matHeaderCellDef>货物 / 车次</th><td mat-cell *matCellDef="let row"><b>{{row.cargo}}</b><small class="block">{{row.hazardClass}} · {{row.trainCode}}</small></td></ng-container>
-            <ng-container matColumnDef="route"><th mat-header-cell *matHeaderCellDef>起终点</th><td mat-cell *matCellDef="let row">{{row.origin}} → {{row.destination}}</td></ng-container>
-            <ng-container matColumnDef="permission"><th mat-header-cell *matHeaderCellDef>许可</th><td mat-cell *matCellDef="let row"><span [class.risk-high]="row.permission!=='有效'">{{row.permission}}</span></td></ng-container>
-            <ng-container matColumnDef="score"><th mat-header-cell *matHeaderCellDef>风险分</th><td mat-cell *matCellDef="let row"><b [class.risk-high]="row.score>=70" [class.risk-mid]="row.score>=45 && row.score<70">{{row.score}}</b> / 100</td></ng-container>
+            <ng-container matColumnDef="route"><th mat-header-cell *matHeaderCellDef>起终点</th><td mat-cell *matCellDef="let row">{{row.origin}} → {{row.destination}}<small class="block">{{row.segments.length}} 个区段</small></td></ng-container>
+            <ng-container matColumnDef="permission"><th mat-header-cell *matHeaderCellDef>许可 / 基线</th><td mat-cell *matCellDef="let row"><span [class.risk-high]="row.permission!=='有效'">{{row.permission}}</span><small class="block">{{row.locked ? '基线 r'+row.baselineRevision+' 已锁定' : '未锁定'}}</small></td></ng-container>
+            <ng-container matColumnDef="score"><th mat-header-cell *matHeaderCellDef>风险分</th><td mat-cell *matCellDef="let row"><b [class.risk-high]="row.score>=70" [class.risk-mid]="row.score>=45 && row.score<70">{{row.score}}</b> / 100<small class="block" [class.risk-mid]="!!row.pendingDraft">{{row.pendingDraft ? '有待复核草案' : '可会签'}}</small></td></ng-container>
             <ng-container matColumnDef="action"><th mat-header-cell *matHeaderCellDef></th><td mat-cell *matCellDef="let row"><button mat-button color="primary" (click)="select(row)">审核</button></td></ng-container>
             <tr mat-header-row *matHeaderRowDef="columns"></tr><tr mat-row *matRowDef="let row; columns: columns" [class.selected-row]="row.id === selectedId"></tr>
           </table>
         </section>
         <aside class="card">
-          <h2>规则引擎结论</h2>
-          @for (route of (state$ | async)?.routes || []; track route.id) {
-            <div class="rule" [class.active]="route.id === selectedId"><div><b>{{route.trainCode}}</b><span>{{route.segments.length}} 个运行区段</span></div><strong [class.risk-high]="route.score >= 70" [class.risk-mid]="route.score < 70">{{route.score >= 70 ? '高风险' : '需复核' }}</strong></div>
+          <h2>会签重算规则</h2>
+          @for (route of routes; track route.id) {
+            <div class="rule" [class.active]="route.id === selectedId"><div><b>{{route.trainCode}} · {{route.id}}</b><span>{{route.segments.length}} 个运行区段 · {{route.locked ? '基线锁定' : '当前版本'}}</span></div><strong [class.risk-high]="route.score >= 70" [class.risk-mid]="route.score < 70">{{route.score >= 70 ? '高风险' : '需复核' }}</strong></div>
           }
           <mat-divider />
-          <h3>强制校验项</h3>
-          <p>✓ 罐车编组隔离与押运资质</p><p class="risk-high">! S-203 水源地保护段缺少属地放行函</p><p>✓ 替代路径具备接卸条件</p>
-          <button mat-flat-button color="primary" style="width:100%" (click)="createAlternative()">要求补充替代方案</button>
+          <h3>系统保证</h3>
+          <p>✓ 只失效风险或顺序受影响区段，其他意见继续有效</p>
+          <p>✓ 并发提交以会签 revision 比较，后到版本不覆盖先到版本</p>
+          <p>✓ 审计基线锁定后，风险、顺序和替代方案均生成待复核草案</p>
+          <p class="risk-mid">! 时间线区分当时依据、失效原因、重新会签与落版结果</p>
+          <button mat-flat-button color="primary" style="width:100%" [disabled]="!selectedRoute" (click)="createAlternative()">要求补充替代方案</button>
         </aside>
       </div>
     </main>
@@ -59,12 +65,27 @@ export class WorkspaceComponent implements OnInit {
   private readonly store = inject(Store<{ routes: RouteState }>)
   readonly state$ = this.store.select('routes')
   readonly columns = ['id', 'cargo', 'route', 'permission', 'score', 'action']
+  routes: RoutePackage[] = []
   selectedId = ''
+  selectedRoute?: RoutePackage
   highRiskCount = 0
+  draftCount = 0
+  version = 1
+  loading = false
 
-  constructor() { this.state$.subscribe((state) => { this.selectedId = state.selectedRouteId; this.highRiskCount = state.routes.flatMap((route: RoutePackage) => route.segments).filter((segment: RoutePackage['segments'][number]) => segment.level === '高').length }) }
+  constructor() {
+    this.state$.subscribe((state: RouteState) => {
+      this.routes = state.routes
+      this.selectedId = state.selectedRouteId
+      this.selectedRoute = state.routes.find((route) => route.id === state.selectedRouteId)
+      this.highRiskCount = state.routes.flatMap((route) => route.segments).filter((segment) => segment.level === '高').length
+      this.draftCount = state.routes.filter((route) => route.pendingDraft).length
+      this.version = state.version
+      this.loading = state.loading
+    })
+  }
   ngOnInit() { this.refresh() }
   refresh() { this.store.dispatch(RouteActions.loadRoutes()) }
   select(row: RoutePackage) { this.store.dispatch(RouteActions.selectRoute({ id: row.id })) }
-  createAlternative() { this.store.dispatch(RouteActions.createAlternative()) }
+  createAlternative() { if (this.selectedRoute) this.store.dispatch(RouteActions.createAlternative({ routeId: this.selectedRoute.id })) }
 }
